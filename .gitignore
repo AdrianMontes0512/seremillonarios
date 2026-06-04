@@ -1,0 +1,17 @@
+# Godot 4+ specific ignores
+.godot/
+/android/
+
+# Steam appid (no subir el de desarrollo)
+steam_appid.txt
+
+# Exports
+/build/
+/exports/
+*.exe
+*.pck
+*.zip
+
+# OS
+.DS_Store
+Thumbs.db

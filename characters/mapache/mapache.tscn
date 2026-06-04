@@ -1,0 +1,26 @@
+[gd_scene format=3 uid="uid://f4lco67ie580"]
+
+[ext_resource type="Script" path="res://characters/mapache/mapache.gd" id="1_mapache"]
+
+[sub_resource type="CapsuleShape3D" id="CapsuleShape3D_mapache"]
+radius = 0.3
+height = 1.4
+
+[sub_resource type="CapsuleMesh" id="CapsuleMesh_mapache"]
+radius = 0.3
+height = 1.4
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_mapache"]
+albedo_color = Color(0.12, 0.78, 0.22, 1)
+
+[node name="Mapache" type="CharacterBody3D"]
+script = ExtResource("1_mapache")
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="."]
+shape = SubResource("CapsuleShape3D_mapache")
+
+[node name="MeshInstance3D" type="MeshInstance3D" parent="."]
+mesh = SubResource("CapsuleMesh_mapache")
+surface_material_override/0 = SubResource("StandardMaterial3D_mapache")
+
+[node name="Skeleton3D" type="Skeleton3D" parent="."]

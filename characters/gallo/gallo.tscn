@@ -1,0 +1,26 @@
+[gd_scene format=3 uid="uid://c3kl8m2oap1qr"]
+
+[ext_resource type="Script" path="res://characters/gallo/gallo.gd" id="1_gallo1"]
+
+[sub_resource type="CapsuleShape3D" id="CapsuleShape3D_gallo"]
+radius = 0.4
+height = 1.7
+
+[sub_resource type="CapsuleMesh" id="CapsuleMesh_gallo"]
+radius = 0.4
+height = 1.7
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_gallo"]
+albedo_color = Color(0.9, 0.12, 0.12, 1)
+
+[node name="Gallo" type="CharacterBody3D"]
+script = ExtResource("1_gallo1")
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="."]
+shape = SubResource("CapsuleShape3D_gallo")
+
+[node name="MeshInstance3D" type="MeshInstance3D" parent="."]
+mesh = SubResource("CapsuleMesh_gallo")
+surface_material_override/0 = SubResource("StandardMaterial3D_gallo")
+
+[node name="Skeleton3D" type="Skeleton3D" parent="."]

@@ -1,0 +1,26 @@
+[gd_scene format=3 uid="uid://ohr17xygmcg5"]
+
+[ext_resource type="Script" path="res://characters/gato/gato.gd" id="1_gato1"]
+
+[sub_resource type="CapsuleShape3D" id="CapsuleShape3D_gato"]
+radius = 0.38
+height = 1.8
+
+[sub_resource type="CapsuleMesh" id="CapsuleMesh_gato"]
+radius = 0.38
+height = 1.8
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_gato"]
+albedo_color = Color(0.58, 0.12, 0.92, 1)
+
+[node name="Gato" type="CharacterBody3D"]
+script = ExtResource("1_gato1")
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="."]
+shape = SubResource("CapsuleShape3D_gato")
+
+[node name="MeshInstance3D" type="MeshInstance3D" parent="."]
+mesh = SubResource("CapsuleMesh_gato")
+surface_material_override/0 = SubResource("StandardMaterial3D_gato")
+
+[node name="Skeleton3D" type="Skeleton3D" parent="."]
