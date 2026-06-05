@@ -13,11 +13,6 @@ var input_queue: Dictionary = {}
 # Registro de todos los personajes en la partida (steam_id -> nodo personaje)
 var all_characters: Dictionary = {}
 
-# Umbral de error de posición para reconciliación
-const POSITION_ERROR_THRESHOLD: float = 0.8
-# Suavizado de interpolación para personajes remotos
-const LERP_SMOOTH: float = 0.2
-
 
 func _ready() -> void:
 	# Conectar la señal de paquetes recibidos desde SteamManager
@@ -65,21 +60,21 @@ func handle_packet(data: Dictionary, from_steam_id: int) -> void:
 
 # Envía el input local del cliente al host
 func _send_local_input() -> void:
-	var my_id: int = SteamManager.my_steam_id
 	var input: Dictionary = {
 		"type": MsgType.INPUT,
 		"seq": input_seq,
 		"dir": _get_input_direction(),
 		"jump": Input.is_action_just_pressed("jump"),
 		"grab": Input.is_action_pressed("grab"),
-		"attack": Input.is_action_just_pressed("attack")
+		"attack": Input.is_action_just_pressed("attack"),
+		"dive": Input.is_action_pressed("dive")
 	}
 	input_seq += 1
 	var host_id: int = SteamManager.get_host_id()
 	SteamManager.send_packet(input, host_id, false)
 
 
-# Obtiene la dirección de movimiento normalizada desde el input del jugador local
+# Obtiene la dirección de movimiento normalizada (plano XZ) desde el input local
 func _get_input_direction() -> Vector3:
 	return Vector3(
 		Input.get_axis("move_left", "move_right"),
@@ -97,7 +92,9 @@ func _apply_queued_inputs() -> void:
 	input_queue.clear()
 
 
-# El host recopila el estado de todos los personajes y lo transmite a los clientes
+# El host recopila el estado de todos los personajes y lo transmite a los clientes.
+# Para el active ragdoll 6DOF enviamos la posición principal (torso) y el estado de
+# los 6 RigidBody3D. Se envía SIEMPRE, no solo en ragdoll.
 func _broadcast_game_state() -> void:
 	var state: Dictionary = {
 		"type": MsgType.STATE,
@@ -107,32 +104,14 @@ func _broadcast_game_state() -> void:
 	for steam_id in all_characters:
 		var c: Node = all_characters[steam_id]
 		state.players[str(steam_id)] = {
-			"pos": c.global_position,
-			"rot": c.global_rotation,
-			"vel": c.velocity,
-			"ragdoll": c.is_ragdoll,
-			"impulse": c.accumulated_impulse,
-			"bones": _get_ragdoll_bone_state(c) if c.is_ragdoll else []
+			"p": c.get_main_position(),
+			"bodies": c.get_net_state()
 		}
 	SteamManager.broadcast(state, true)
 
 
-# Obtiene el estado de los huesos del ragdoll de un personaje
-func _get_ragdoll_bone_state(character: Node) -> Array:
-	var bones: Array = []
-	if not character.has_node("Skeleton3D"):
-		return bones
-	for bone in character.get_node("Skeleton3D").get_children():
-		if bone is PhysicalBone3D:
-			bones.append({
-				"name": bone.name,
-				"pos": bone.global_position,
-				"rot": bone.global_rotation
-			})
-	return bones
-
-
-# Aplica el estado autoritativo recibido del host a los personajes locales
+# Aplica el estado autoritativo recibido del host. El cliente NUNCA es authority:
+# solo muestra el estado de los cuerpos (sin reconciliación, los cuerpos están congelados).
 func _apply_state(state: Dictionary) -> void:
 	if not state.has("players"):
 		return
@@ -142,65 +121,26 @@ func _apply_state(state: Dictionary) -> void:
 		var character: Node = get_character_by_steam_id(steam_id)
 		if not character:
 			continue
-		if character.is_local:
-			# Reconciliar el personaje local con el estado autoritativo
-			_reconcile_local(character, data)
-		else:
-			# Aplicar interpolación al personaje remoto
-			_apply_remote(character, data)
-
-
-# Reconcilia la posición del personaje local con el estado autoritativo del host
-func _reconcile_local(character: Node, auth: Dictionary) -> void:
-	var error: float = character.global_position.distance_to(auth.pos)
-	if error > POSITION_ERROR_THRESHOLD:
-		# Error grande: corrección directa
-		character.global_position = auth.pos
-		character.velocity = auth.vel
-	elif error > 0.1:
-		# Error pequeño: interpolación suave
-		character.global_position = character.global_position.lerp(auth.pos, 0.3)
-	# Sincronizar huesos del ragdoll si corresponde
-	if auth.ragdoll and character.is_ragdoll and auth.bones.size() > 0:
-		_apply_bone_state(character, auth.bones)
-
-
-# Interpola la posición y rotación de un personaje remoto hacia el estado autoritativo
-func _apply_remote(character: Node, auth: Dictionary) -> void:
-	character.global_position = character.global_position.lerp(auth.pos, LERP_SMOOTH)
-	character.global_rotation = character.global_rotation.lerp(auth.rot, LERP_SMOOTH)
-	# Sincronizar estado de ragdoll si difiere
-	if auth.ragdoll != character.is_ragdoll:
-		if auth.ragdoll:
-			character.enter_ragdoll(Vector3.ZERO, character.global_position)
-		else:
-			character.exit_ragdoll()
-
-
-# Aplica el estado de los huesos del ragdoll al personaje
-func _apply_bone_state(character: Node, bones: Array) -> void:
-	if not character.has_node("Skeleton3D"):
-		return
-	for bone_data in bones:
-		var bone: Node = character.get_node_or_null("Skeleton3D/" + bone_data.name)
-		if bone:
-			bone.global_position = bone_data.pos
-			bone.global_rotation = bone_data.rot
+		# Aplicar las transformaciones de los 6 cuerpos recibidas del host
+		if data.has("bodies"):
+			character.apply_net_state(data["bodies"])
 
 
 # Enruta el paquete HIT: si no está confirmado lo valida el host,
-# si ya viene confirmado lo aplica como ragdoll
+# si ya viene confirmado lo aplica como impulso/KO
 func _handle_hit(data: Dictionary) -> void:
 	if not data.has("confirmed"):
 		# Request del cliente — solo el host valida
 		if SteamManager.is_host:
 			_validate_hit_request(data)
 	else:
-		# Confirmación del host — aplicar ragdoll localmente
+		# Confirmación del host — aplicar el golpe localmente
 		_apply_confirmed_hit(data)
 
 
-# El host valida el request de golpe, calcula la fuerza y hace broadcast de la confirmación
+# El host valida el request de golpe, calcula la fuerza y hace broadcast de la confirmación.
+# Usa get_main_position() (posición del torso) para medir distancias, ya que el root del
+# 6DOF es estático y su global_position no representa la posición real del personaje.
 func _validate_hit_request(data: Dictionary) -> void:
 	if not data.has("attacker"):
 		return
@@ -209,19 +149,32 @@ func _validate_hit_request(data: Dictionary) -> void:
 	if not attacker:
 		return
 
-	# Buscar el objetivo más cercano dentro del rango
-	var closest: Dictionary = HitSystem.find_closest_target(
-		attacker.global_position,
-		all_characters,
-		attacker_steam_id
-	)
-	if closest.is_empty():
+	var attacker_pos: Vector3 = attacker.get_main_position()
+
+	# Buscar el objetivo más cercano dentro del rango (loop simple sobre los personajes)
+	var closest_node: Node = null
+	var closest_steam_id: int = 0
+	var closest_pos: Vector3 = Vector3.ZERO
+	var closest_dist: float = HIT_RANGE
+	for steam_id in all_characters:
+		if steam_id == attacker_steam_id:
+			continue
+		var c: Node = all_characters[steam_id]
+		var c_pos: Vector3 = c.get_main_position()
+		var dist: float = attacker_pos.distance_to(c_pos)
+		if dist <= closest_dist:
+			closest_dist = dist
+			closest_node = c
+			closest_steam_id = steam_id
+			closest_pos = c_pos
+
+	if closest_node == null:
 		return
 
-	# Calcular fuerza del golpe con el impulso acumulado del atacante
+	# Calcular la fuerza del golpe en dirección al objetivo (más impulso acumulado opcional)
 	var hit_force: Vector3 = HitSystem.calculate_hit_force(
-		attacker.global_position,
-		closest.node.global_position,
+		attacker_pos,
+		closest_pos,
 		data.get("accumulated_impulse", Vector3.ZERO)
 	)
 
@@ -229,9 +182,9 @@ func _validate_hit_request(data: Dictionary) -> void:
 	var confirmation: Dictionary = {
 		"type": MsgType.HIT,
 		"confirmed": true,
-		"target_id": closest.steam_id,
+		"target_id": closest_steam_id,
 		"force": hit_force,
-		"point": closest.node.global_position,
+		"point": closest_pos
 	}
 	SteamManager.broadcast(confirmation, true)
 

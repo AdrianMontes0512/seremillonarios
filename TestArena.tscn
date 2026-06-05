@@ -1,7 +1,7 @@
 [gd_scene format=3 uid="uid://dwhe7jsci7xl1"]
 
 [ext_resource type="Script" uid="uid://4yi535k6eetk" path="res://scenes/test_arena.gd" id="1_vbrju"]
-[ext_resource type="PackedScene" uid="uid://c3kl8m2oap1qr" path="res://characters/gallo/gallo.tscn" id="2_8rolg"]
+[ext_resource type="PackedScene" path="res://characters/gallo/gallo_6dof.tscn" id="2_8rolg"]
 
 [sub_resource type="Environment" id="Environment_8x3q6"]
 ambient_light_color = Color(1, 1, 1, 1)

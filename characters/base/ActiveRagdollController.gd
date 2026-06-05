@@ -1,6 +1,9 @@
 extends Node3D
 class_name ActiveRagdollController
 
+# Componente de red (host-autoritativo). Ver docs/refine/NET-CONTRACT.md
+const NET := preload("res://characters/base/components/ragdoll_net_sync.gd")
+
 # ============================================================================
 # ACTIVE RAGDOLL CONTROLLER (6 huesos · RigidBody3D + Generic6DOFJoint3D)
 # Estilo Gang Beasts. Todo es físico: NO hay CharacterBody3D.
@@ -73,8 +76,20 @@ var _arms_up: float = 0.0         # 0..1 interpolado, cuánto están levantados 
 # Cache de huesos para iterar
 var _bones: Array[RigidBody3D] = []
 
+# --- Estado de red (host-autoritativo) ---
+# Defaults pensados para juego en SOLO (escena suelta): simula y es controlable.
+# En red, test_arena llama setup_net() y sobreescribe estos valores.
+var is_local := true
+var player_id := 0
+var is_authority := true
+var is_ragdoll := false
+var accumulated_impulse := Vector3.ZERO
+var _remote_input := {}
+var _net = null
+
 
 func _ready() -> void:
+	_net = NET.new()
 	_bones = [torso, head, arm_l, arm_r, leg_l, leg_r]
 
 	# 1) Que los huesos del MISMO personaje NO colisionen entre sí (si lo hicieran,
@@ -142,15 +157,50 @@ func _set_muscle_stiffness(j: Generic6DOFJoint3D, stiffness: float, damping: flo
 # BUCLE DE FÍSICA
 # ============================================================================
 func _physics_process(delta: float) -> void:
+	# GATING de red: el cliente NO simula. Solo muestra (cuerpos congelados,
+	# los maneja apply_net_state desde la red). Return inmediato.
+	if not is_authority:
+		return
+
 	_update_timers(delta)
 
 	# Si está noqueado, no hay control: ragdoll puramente pasivo.
 	if _ko_timer > 0.0:
 		return
 
-	_apply_locomotion(delta)
+	if is_local:
+		# Jugador del host: lee Input directamente.
+		_apply_locomotion(_local_move_input(), delta)
+		_apply_arms_state(Input.is_action_pressed("raise_arms"), delta)
+	else:
+		# Avatar de un cliente: usa el último input recibido por apply_input.
+		_apply_remote_input(delta)
+
 	_apply_upright(delta)
-	_apply_arms(delta)
+
+
+# Lee la dirección de movimiento desde el InputMap local (jugador del host).
+func _local_move_input() -> Vector3:
+	return Vector3(
+		Input.get_axis("move_left", "move_right"),
+		0.0,
+		Input.get_axis("move_forward", "move_back")
+	)
+
+
+# Traduce el _remote_input (dict del cliente) a acciones físicas, reutilizando
+# la lógica de locomoción/acciones existente pero con la dir del dict.
+func _apply_remote_input(delta: float) -> void:
+	var dir: Vector3 = _remote_input.get("dir", Vector3.ZERO)
+	_apply_locomotion(dir, delta)
+	_apply_arms_state(bool(_remote_input.get("grab", false)), delta)
+
+	if bool(_remote_input.get("jump", false)):
+		torso.apply_central_impulse(Vector3.UP * dive_impulse)
+	if bool(_remote_input.get("attack", false)):
+		_punch(arm_r, false)
+	if bool(_remote_input.get("dive", false)):
+		_dive()
 
 
 func _update_timers(delta: float) -> void:
@@ -170,12 +220,9 @@ func _update_timers(delta: float) -> void:
 
 
 # --- 1) LOCOMOCIÓN: fuerza horizontal al torso, con tope de velocidad ---
-func _apply_locomotion(_delta: float) -> void:
-	var input := Vector3(
-		Input.get_axis("move_left", "move_right"),
-		0.0,
-		Input.get_axis("move_forward", "move_back")
-	)
+# `dir` viene del Input (host local) o del _remote_input (avatar de cliente).
+func _apply_locomotion(dir: Vector3, _delta: float) -> void:
+	var input := dir
 	if input.length() > 1.0:
 		input = input.normalized()
 
@@ -217,8 +264,7 @@ func _apply_upright(_delta: float) -> void:
 
 
 # --- 3) BRAZOS ARRIBA: interpola el equilibrio del resorte de los brazos ---
-func _apply_arms(delta: float) -> void:
-	var want_up := Input.is_action_pressed("raise_arms")
+func _apply_arms_state(want_up: bool, delta: float) -> void:
 	_arms_up = move_toward(_arms_up, 1.0 if want_up else 0.0, delta * 5.0)
 	var target := deg_to_rad(arm_raise_angle_deg) * _arms_up
 	# Eje X del joint = levantar/bajar el brazo (ajustar según orientación del joint).
@@ -230,6 +276,10 @@ func _apply_arms(delta: float) -> void:
 # ACCIONES (llamar desde _unhandled_input o desde aquí con is_action_just_pressed)
 # ============================================================================
 func _unhandled_input(event: InputEvent) -> void:
+	# Solo el jugador del host (authority + local) actúa por input directo.
+	# El cliente envía su input por red (network_manager) y el host lo aplica.
+	if not (is_authority and is_local):
+		return
 	if _ko_timer > 0.0:
 		return
 	if event.is_action_pressed("punch_left"):
@@ -295,6 +345,7 @@ func _on_bone_impact(body: Node) -> void:
 func _knockout() -> void:
 	_ko_timer = ko_duration
 	_balance_scale = 0.0
+	is_ragdoll = true
 	# Músculos a 0 Y límites angulares desactivados → ragdoll PASIVO total
 	# (se desploma de verdad como desmayado, no solo se hunde).
 	for j in [joint_head, joint_arm_l, joint_arm_r, joint_leg_l, joint_leg_r]:
@@ -306,8 +357,49 @@ func _knockout() -> void:
 # Recuperarse: restaurar músculos y equilibrio (el personaje se vuelve a parar).
 func _recover_from_ko() -> void:
 	_balance_scale = 1.0
+	is_ragdoll = false
 	_setup_muscle(joint_head, head_swing_deg)
 	_setup_muscle(joint_arm_l, arm_swing_deg)
 	_setup_muscle(joint_arm_r, arm_swing_deg)
 	_setup_muscle(joint_leg_l, leg_swing_deg)
 	_setup_muscle(joint_leg_r, leg_swing_deg)
+
+
+# ============================================================================
+# INTERFAZ DE RED (host-autoritativo) — ver docs/refine/NET-CONTRACT.md
+# ============================================================================
+func setup_net(p_is_local: bool, p_player_id: int, p_is_authority: bool) -> void:
+	is_local = p_is_local
+	player_id = p_player_id
+	is_authority = p_is_authority
+	# El cliente NO simula: congela los cuerpos para que la red controle su transform.
+	if not is_authority and _net:
+		_net.set_client_mode(self)
+
+
+# Posición "real" del personaje = la del torso físico (no la del nodo raíz).
+func get_main_position() -> Vector3:
+	return torso.global_position if torso else global_position
+
+
+# Estado de los 6 cuerpos (lo llama el host para transmitir).
+func get_net_state() -> Array:
+	return _net.get_state(self) if _net else []
+
+
+# Aplica el estado recibido (lo llama el cliente cada tick).
+func apply_net_state(state: Array) -> void:
+	if _net:
+		_net.apply_state(self, state)
+
+
+# El host guarda el input del cliente; se consume en _physics_process.
+func apply_input(input: Dictionary) -> void:
+	_remote_input = input
+
+
+# Golpe recibido (confirmado por el host): noquea y empuja el torso.
+func receive_hit(force: Vector3, _from_pos: Vector3) -> void:
+	if torso:
+		torso.apply_central_impulse(force)
+	_knockout()

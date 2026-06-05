@@ -112,11 +112,11 @@ func _spawn_local_character(spawn_pos: Vector3) -> void:
 		push_error("TestArena: asignar character_scene en el Inspector")
 		return
 	local_character = character_scene.instantiate()
-	# Configurar antes de add_child para que _ready vea los valores correctos
-	local_character.is_local = true
-	local_character.player_id = SteamManager.my_steam_id
 	add_child(local_character)
+	# Mover el root Node3D (desplaza los 6 cuerpos del ragdoll al spawn)
 	local_character.global_position = spawn_pos
+	# Configurar la red via el controlador: local, mi steam id, authority = host
+	local_character.setup_net(true, SteamManager.my_steam_id, SteamManager.is_host)
 	NetworkManager.register_character(SteamManager.my_steam_id, local_character)
 	print("TestArena: personaje LOCAL spawneado en ", spawn_pos)
 
@@ -125,10 +125,11 @@ func _spawn_remote_character(steam_id: int, spawn_pos: Vector3) -> void:
 	if character_scene == null:
 		return
 	remote_character = character_scene.instantiate()
-	remote_character.is_local = false
-	remote_character.player_id = steam_id
 	add_child(remote_character)
+	# Mover el root Node3D (desplaza los 6 cuerpos del ragdoll al spawn)
 	remote_character.global_position = spawn_pos
+	# Configurar la red via el controlador: remoto, su steam id, authority = host
+	remote_character.setup_net(false, steam_id, SteamManager.is_host)
 	NetworkManager.register_character(steam_id, remote_character)
 	print("TestArena: personaje REMOTO spawneado — Steam ID: ", steam_id)
 
