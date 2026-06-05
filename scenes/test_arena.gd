@@ -97,6 +97,9 @@ func _on_lobby_joined(lobby_id: int) -> void:
 
 
 func _on_peer_connected(steam_id: int) -> void:
+	# Evitar spawnear el remoto dos veces (puede llegar por dos caminos)
+	if remote_character != null:
+		return
 	print("TestArena: peer conectado — Steam ID: ", steam_id)
 	# El remoto va en el spawn opuesto al nuestro
 	var remote_pos: Vector3 = spawn2.global_position if SteamManager.is_host else spawn1.global_position

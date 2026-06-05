@@ -129,6 +129,12 @@ func _on_lobby_joined(joined_lobby_id: int, _permissions: int, _locked: bool, re
 	Steam.allowP2PPacketRelay(true)
 	Steam.acceptP2PSessionWithUser(host_id)
 	emit_signal("lobby_joined_ok", lobby_id)
+	# Pre-aceptamos la sesión con el host, así que Steam NO disparará
+	# p2p_session_request en este cliente. Registramos al host como peer
+	# manualmente para spawnear su personaje remoto.
+	if not connected_peers.has(host_id):
+		connected_peers.append(host_id)
+		emit_signal("peer_connected", host_id)
 
 
 func _on_p2p_request(remote_steam_id: int) -> void:

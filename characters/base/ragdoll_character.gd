@@ -212,15 +212,19 @@ func deliver_hit(target: Node) -> void:
 # Aplicar inputs remotos (llamado por el host en multijugador)
 # ============================================================
 func apply_input(input: Dictionary) -> void:
-	# Aplicar salto remoto
-	if input.has("jump") and input["jump"]:
-		velocity.y = jump_force
-
 	# Aplicar dirección de movimiento remota
 	if input.has("dir"):
 		var dir: Vector3 = input["dir"]
 		velocity.x = dir.x * move_speed
 		velocity.z = dir.z * move_speed
+
+	# Salto remoto: solo si está en el suelo (igual que handle_jump)
+	if input.has("jump") and input["jump"] and is_on_floor():
+		velocity.y = jump_force
+
+	# Gravedad — sin esto el personaje vuela hacia arriba para siempre
+	if not is_on_floor():
+		velocity.y -= 9.8 * get_physics_process_delta_time()
 
 	# Placeholder para ataque remoto
 	if input.has("attack") and input["attack"] and has_method("deliver_hit"):
