@@ -3,17 +3,16 @@ extends "res://characters/base/ragdoll_character.gd"
 
 
 func _ready() -> void:
-	super._ready()
-	# Masa media-alta para resistencia al derribo
+	# Masa media-alta: cuesta tumbarlo
 	mass = 75.0
-	# Velocidad de movimiento moderada-alta
-	move_speed = 6.0
-	# Salto moderado
-	jump_force = 7.5
-	# Umbral alto antes de entrar en ragdoll
+	# Movimiento moderado-alto
+	move_force = 6.5
+	jump_force = 6.0
+	# El más estable: se endereza fuerte y resiste el derribo
+	balance_strength = 20.0
+	hover_strength = 38.0
 	ragdoll_threshold = 20.0
-	# Absorbe bien los impactos
-	impulse_absorption = 0.4
-	# Poco multiplicador de lanzamiento, difícil de volar
 	launch_multiplier = 0.7
-	print("Personaje: Gallo (rojo)")
+	stun_time = 1.1
+	super._ready()
+	print("Personaje: Gallo (rojo) — active ragdoll")

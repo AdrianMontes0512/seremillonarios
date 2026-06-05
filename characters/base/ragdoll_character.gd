@@ -1,234 +1,174 @@
 extends CharacterBody3D
 
 # ============================================================
-# Script base del personaje ragdoll
-# Maneja movimiento, salto, golpes y simulación de ragdoll
+# Personaje ACTIVE RAGDOLL (estilo Gang Beasts) — ORQUESTADOR
+# Siempre simulado como ragdoll. Delega el comportamiento en 3 componentes:
+#   - RagdollBalance     (torso vertical + hover + cabeza rígida)
+#   - RagdollLocomotion  (movimiento como unidad + estabilidad de piernas)
+#   - RagdollCombat      (punch + knockdown + recuperación)
+# Cada componente vive en su propio archivo (characters/base/components/).
 # ============================================================
 
-# --- Variables exportables ---
+# --- Tuning (ajustable por personaje) ---
 @export var mass: float = 70.0
-@export var move_speed: float = 6.0
-@export var jump_force: float = 8.0
-@export var ragdoll_threshold: float = 15.0
+@export var move_force: float = 9.0          # empuje horizontal al moverse
+@export var jump_force: float = 6.0          # impulso vertical del salto
+@export var balance_strength: float = 10.0   # rapidez de enderezado (rad/s por rad)
+@export var hover_strength: float = 26.0     # fuerza del resorte de altura
+@export var hover_damp: float = 6.0          # amortiguación vertical del hover
+@export var ragdoll_threshold: float = 15.0  # fuerza de golpe para tumbarlo
 @export var impulse_absorption: float = 0.3
 @export var launch_multiplier: float = 1.0
+@export var stun_time: float = 1.3           # segundos sin equilibrio tras un golpe
 
-# --- Variables de estado ---
-var is_ragdoll: bool = false
-var accumulated_impulse: Vector3 = Vector3.ZERO
-var ragdoll_timer: float = 0.0
+# --- Estado ---
 var player_id: int = 0
 var is_local: bool = false
+var accumulated_impulse: Vector3 = Vector3.ZERO
+var is_ragdoll: bool = false   # true = tumbado/aturdido (sin control de equilibrio)
 
-# --- Constantes ---
-const RAGDOLL_RECOVERY_TIME: float = 1.5
+# --- Referencias internas ---
+var _skel: Skeleton3D = null
+var _torso: PhysicalBone3D = null
+var _target_height: float = 0.0
+var _stand_height: float = 0.0
+var _stun: float = 0.0
+
+# --- Componentes (preload para no depender del cache de class_name) ---
+const _BalanceScript := preload("res://characters/base/components/ragdoll_balance.gd")
+const _LocomotionScript := preload("res://characters/base/components/ragdoll_locomotion.gd")
+const _CombatScript := preload("res://characters/base/components/ragdoll_combat.gd")
+var _balance = null
+var _locomotion = null
+var _combat = null
+
 const BASE_HIT_POWER: float = 12.0
+const GRAVITY: float = 9.8
+const MAX_RIGHT_SPEED: float = 9.0   # tope de velocidad angular de enderezado (rad/s)
 
 
 func _ready() -> void:
-	# Intentar asignar la masa si el CharacterBody3D expone esa propiedad
-	if "mass" in self:
-		self.mass = mass
-	print("[RagdollCharacter] Listo. player_id=%d | is_local=%s | mass=%.1f" % [player_id, is_local, mass])
+	_skel = get_node_or_null("Skeleton3D")
+	# La cápsula de caminar ya no se usa: todo el movimiento es físico (ragdoll).
+	if has_node("CollisionShape3D"):
+		$CollisionShape3D.disabled = true
+
+	setup_bone_collision_layers()
+
+	if _skel:
+		_torso = bone("torso")
+		_skel.physical_bones_start_simulation()
+		_setup_bone_physics()
+		await get_tree().physics_frame
+		if _torso:
+			_target_height = _torso.global_position.y
+			_stand_height = _target_height
+
+	_balance = _BalanceScript.new()
+	_locomotion = _LocomotionScript.new()
+	_combat = _CombatScript.new()
+
+	print("[RagdollCharacter] Active ragdoll listo. player_id=%d | is_local=%s" % [player_id, is_local])
+
+
+# Devuelve el PhysicalBone3D por nombre (torso, head, arm_l, arm_r, leg_l, leg_r).
+func bone(n: String) -> PhysicalBone3D:
+	if _skel == null:
+		return null
+	return _skel.get_node_or_null(n) as PhysicalBone3D
+
+
+# Capa 2 = huesos del ragdoll; máscara a la capa 1 = mundo/piso.
+func setup_bone_collision_layers() -> void:
+	if _skel == null:
+		return
+	for child in _skel.get_children():
+		if child is PhysicalBone3D:
+			child.collision_layer = 2
+			child.collision_mask = 1
+
+
+# Física base de huesos. El torso flota (sin gravedad) y lo sostiene el hover;
+# el resto cuelga con gravedad. (Los JOINTS los configura tools/build_gallo_ragdoll.gd)
+func _setup_bone_physics() -> void:
+	for c in _skel.get_children():
+		if c is PhysicalBone3D:
+			c.linear_damp = 0.5
+			c.angular_damp = 1.0
+	if _torso:
+		_torso.gravity_scale = 0.0
+		_torso.linear_damp = 0.7   # bajo: el hover puede levantarlo rápido
+		_torso.angular_damp = 6.0
 
 
 func _physics_process(delta: float) -> void:
-	# Solo el jugador local procesa inputs directamente
-	if not is_local:
+	if _torso == null:
 		return
 
-	if is_ragdoll:
-		try_exit_ragdoll(delta)
+	# Aturdido tras un golpe: cae como trapo y luego se levanta solo.
+	if _stun > 0.0:
+		_combat.tick_stunned(self, delta)
 		return
 
-	handle_movement(delta)
-	handle_jump()
-	handle_grab()
+	# Orden de escritura sobre el torso: balance -> locomoción -> combate.
+	_balance.tick(self, delta)
+	if is_local:
+		_locomotion.tick(self, delta)
+	_combat.tick(self, delta)
 
 
 # ============================================================
-# Movimiento del personaje
+# Entradas de red / combate (delegan en los componentes)
 # ============================================================
-func handle_movement(delta: float) -> void:
-	# Leer ejes de entrada horizontal
-	var move_x: float = Input.get_axis("move_left", "move_right")
-	var move_z: float = Input.get_axis("move_forward", "move_back")
-
-	# Construir dirección normalizada
-	var dir: Vector3 = Vector3(move_x, 0.0, move_z)
-	if dir.length() > 1.0:
-		dir = dir.normalized()
-
-	velocity.x = dir.x * move_speed
-	velocity.z = dir.z * move_speed
-
-	# Aplicar gravedad cuando no está en el suelo
-	if not is_on_floor():
-		velocity.y -= 9.8 * delta
-
-	move_and_slide()
+func receive_hit(force: Vector3, _from_pos: Vector3) -> void:
+	var total_force: Vector3 = force + accumulated_impulse
+	if total_force.length() >= ragdoll_threshold:
+		accumulated_impulse = Vector3.ZERO
+		_combat.knock_down(self, total_force * launch_multiplier)
+	else:
+		accumulated_impulse += force * impulse_absorption
 
 
-# ============================================================
-# Salto
-# ============================================================
-func handle_jump() -> void:
-	if Input.is_action_just_pressed("jump") and is_on_floor():
-		velocity.y = jump_force
+# Atajo para tests / disparos directos.
+func knock_down(impulse: Vector3) -> void:
+	_combat.knock_down(self, impulse)
 
 
-# ============================================================
-# Agarrar / atacar — detecta la acción de ataque y delega
-# ============================================================
-func handle_grab() -> void:
-	if Input.is_action_just_pressed("attack"):
-		attempt_attack()
-
-
-# ============================================================
-# Intento de ataque con client-side prediction
-# El feedback es inmediato; la confirmación del daño viene del host
-# ============================================================
 func attempt_attack() -> void:
-	print("ATTACK ejecutado — buscando objetivo cercano")
-
+	if _combat:
+		_combat.punch(self)
 	var attack_data: Dictionary = {
 		"type": 2,  # MsgType.HIT
 		"attacker": str(player_id),
-		"attacker_pos": global_position,
-		"attacker_vel": velocity,
+		"attacker_pos": get_main_position(),
+		"attacker_vel": _torso.linear_velocity if _torso else Vector3.ZERO,
 		"timestamp": Time.get_ticks_msec(),
 		"accumulated_impulse": accumulated_impulse,
 	}
-
 	if SteamManager.is_host:
-		# El host valida su propio request directamente sin viaje de red
 		if NetworkManager.has_method("_validate_hit_request"):
 			NetworkManager._validate_hit_request(attack_data)
 	else:
-		# El cliente envía el request al host para validación autoritativa
 		var host_id: int = SteamManager.get_host_id()
 		SteamManager.send_packet(attack_data, host_id, true)
 
 
-# ============================================================
-# Entrar en modo ragdoll
-# ============================================================
-func enter_ragdoll(force: Vector3, point: Vector3) -> void:
-	# Evitar entrar en ragdoll si ya está activo
-	if is_ragdoll:
-		return
-
-	is_ragdoll = true
-	ragdoll_timer = 0.0
-
-	# Desactivar el colisionador principal para ceder el control a los huesos
-	if has_node("CollisionShape3D"):
-		$CollisionShape3D.disabled = true
-
-	# Activar simulación física de los huesos
-	if has_node("Skeleton3D"):
-		$Skeleton3D.physical_bones_start_simulation()
-
-		# Aplicar impulso al hueso torso si existe
-		for child in $Skeleton3D.get_children():
-			if child is PhysicalBone3D:
-				# Se asume que el primer PhysicalBone3D encontrado es el torso
-				child.apply_impulse(force, point - child.global_position)
-				break
-
-
-# ============================================================
-# Intentar salir del modo ragdoll
-# ============================================================
-func try_exit_ragdoll(delta: float) -> void:
-	if not is_ragdoll:
-		return
-
-	ragdoll_timer += delta
-
-	# Salir solo si el tiempo de recuperación pasó y el personaje está en el suelo
-	if ragdoll_timer >= RAGDOLL_RECOVERY_TIME and is_on_floor():
-		exit_ragdoll()
-
-
-# ============================================================
-# Salir del modo ragdoll y recuperar el control
-# ============================================================
-func exit_ragdoll() -> void:
-	is_ragdoll = false
-
-	# Reactivar el colisionador principal
-	if has_node("CollisionShape3D"):
-		$CollisionShape3D.disabled = false
-
-	# Detener la simulación física de los huesos
-	if has_node("Skeleton3D"):
-		$Skeleton3D.physical_bones_stop_simulation()
-
-		# Reposicionar el CharacterBody3D en la posición del primer hueso físico
-		for child in $Skeleton3D.get_children():
-			if child is PhysicalBone3D:
-				global_position = child.global_position
-				break
-
-
-# ============================================================
-# Recibir un golpe desde otra fuente
-# ============================================================
-func receive_hit(force: Vector3, from_pos: Vector3) -> void:
-	var total_force: Vector3 = force + accumulated_impulse
-
-	if total_force.length() >= ragdoll_threshold:
-		# La fuerza supera el umbral: activar ragdoll
-		enter_ragdoll(total_force * launch_multiplier, from_pos)
-		accumulated_impulse = Vector3.ZERO
-	else:
-		# Fuerza insuficiente: acumular como stagger
-		accumulated_impulse += force * impulse_absorption
-		print("[RagdollCharacter] Stagger absorbido. Impulso acumulado: ", accumulated_impulse)
-
-
-# ============================================================
-# Entregar un golpe a otro nodo
-# ============================================================
 func deliver_hit(target: Node) -> void:
-	# Validar objetivo
 	if target == null or target == self:
 		return
-
-	var direction: Vector3 = (target.global_position - global_position).normalized()
+	var direction: Vector3 = (target.get_main_position() - get_main_position()).normalized()
 	var hit_force: Vector3 = direction * BASE_HIT_POWER + accumulated_impulse
-
-	# Limpiar impulso acumulado tras usarlo
 	accumulated_impulse = Vector3.ZERO
-
-	# Enviar golpe si el objetivo lo soporta
 	if target.has_method("receive_hit"):
-		target.receive_hit(hit_force, global_position)
+		target.receive_hit(hit_force, get_main_position())
 
 
-# ============================================================
-# Aplicar inputs remotos (llamado por el host en multijugador)
-# ============================================================
+# Posición "real" del personaje = la del torso físico (no del nodo raíz).
+func get_main_position() -> Vector3:
+	return _torso.global_position if _torso else global_position
+
+
+# Input remoto (el host aplica los inputs del cliente).
 func apply_input(input: Dictionary) -> void:
-	# Aplicar dirección de movimiento remota
-	if input.has("dir"):
-		var dir: Vector3 = input["dir"]
-		velocity.x = dir.x * move_speed
-		velocity.z = dir.z * move_speed
-
-	# Salto remoto: solo si está en el suelo (igual que handle_jump)
-	if input.has("jump") and input["jump"] and is_on_floor():
-		velocity.y = jump_force
-
-	# Gravedad — sin esto el personaje vuela hacia arriba para siempre
-	if not is_on_floor():
-		velocity.y -= 9.8 * get_physics_process_delta_time()
-
-	# Placeholder para ataque remoto
-	if input.has("attack") and input["attack"] and has_method("deliver_hit"):
-		# TODO: determinar objetivo del ataque remoto
-		pass
-
-	move_and_slide()
+	if _locomotion:
+		_locomotion.apply_remote(self, input)

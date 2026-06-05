@@ -15,3 +15,9 @@ steam_appid.txt
 # OS
 .DS_Store
 Thumbs.db
+
+# Capturas de validación (no versionar)
+tools/*.png
+/tmp/
+tools/*.png.import
+*.blend1
