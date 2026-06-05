@@ -132,16 +132,35 @@ func _on_lobby_joined(joined_lobby_id: int, _permissions: int, _locked: bool, re
 	# Pre-aceptamos la sesión con el host, así que Steam NO disparará
 	# p2p_session_request en este cliente. Registramos al host como peer
 	# manualmente para spawnear su personaje remoto.
-	if not connected_peers.has(host_id):
+	# IMPORTANTE: el host también recibe lobby_joined al crear su lobby;
+	# en ese caso host_id == my_steam_id y NO debe registrarse a sí mismo
+	# (si no, aparece un "peer fantasma" antes de que nadie se una).
+	if host_id != my_steam_id and not connected_peers.has(host_id):
 		connected_peers.append(host_id)
 		emit_signal("peer_connected", host_id)
 
 
 func _on_p2p_request(remote_steam_id: int) -> void:
+	# Ignorar peticiones de quien no es miembro de nuestro lobby
+	# (ruido de Spacewar/AppID 480 o instancias viejas) y de nosotros mismos.
+	if remote_steam_id == my_steam_id or not _is_lobby_member(remote_steam_id):
+		push_warning("SteamManager: P2P de no-miembro ignorado — " + str(remote_steam_id))
+		return
 	Steam.acceptP2PSessionWithUser(remote_steam_id)
 	if not connected_peers.has(remote_steam_id):
 		connected_peers.append(remote_steam_id)
 		emit_signal("peer_connected", remote_steam_id)
+
+
+# Verifica si un Steam ID es miembro del lobby actual
+func _is_lobby_member(steam_id: int) -> bool:
+	if lobby_id == 0:
+		return false
+	var count: int = Steam.getNumLobbyMembers(lobby_id)
+	for i in count:
+		if Steam.getLobbyMemberByIndex(lobby_id, i) == steam_id:
+			return true
+	return false
 
 
 func _on_p2p_fail(remote_steam_id: int, error: int) -> void:
