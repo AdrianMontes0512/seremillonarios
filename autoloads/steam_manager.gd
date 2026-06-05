@@ -8,8 +8,13 @@ extends Node
 
 signal lobby_created(lobby_id: int)
 signal lobby_joined_ok(lobby_id: int)
+signal lobby_list_received(lobbies: Array)
 signal peer_connected(steam_id: int)
 signal packet_received(data: Dictionary, from_steam_id: int)
+
+# Clave/valor que identifica los lobbies de este juego
+const GAME_KEY: String = "game"
+const GAME_VALUE: String = "seremosmillonarios"
 
 var my_steam_id: int = 0
 var lobby_id: int = 0
@@ -43,6 +48,7 @@ func _ready() -> void:
 
 	Steam.lobby_created.connect(_on_lobby_created)
 	Steam.lobby_joined.connect(_on_lobby_joined)
+	Steam.lobby_match_list.connect(_on_lobby_match_list)
 	Steam.p2p_session_request.connect(_on_p2p_request)
 	Steam.p2p_session_connect_fail.connect(_on_p2p_fail)
 
@@ -64,6 +70,22 @@ func create_lobby() -> void:
 		emit_signal("lobby_created", lobby_id)
 		return
 	Steam.createLobby(Steam.LOBBY_TYPE_PUBLIC, 4)
+
+
+# Pide la lista de lobbies de este juego (solo el cliente que se une)
+func request_lobby_list() -> void:
+	if not _steam_available:
+		# Offline: simular que existe un lobby para unirse
+		emit_signal("lobby_list_received", [999999])
+		return
+	Steam.addRequestLobbyListStringFilter(GAME_KEY, GAME_VALUE, Steam.LOBBY_COMPARISON_EQUAL)
+	Steam.addRequestLobbyListDistanceFilter(Steam.LOBBY_DISTANCE_FILTER_WORLDWIDE)
+	Steam.requestLobbyList()
+
+
+func _on_lobby_match_list(lobbies: Array) -> void:
+	print("SteamManager: lobbies encontrados — ", lobbies.size())
+	emit_signal("lobby_list_received", lobbies)
 
 
 func join_lobby(target_lobby_id: int) -> void:
@@ -94,7 +116,7 @@ func _on_lobby_created(result: int, new_lobby_id: int) -> void:
 		push_error("SteamManager: Error al crear lobby — " + str(result))
 		return
 	lobby_id = new_lobby_id
-	Steam.setLobbyData(lobby_id, "game", "seremosmillonarios")
+	Steam.setLobbyData(lobby_id, GAME_KEY, GAME_VALUE)
 	emit_signal("lobby_created", lobby_id)
 
 
@@ -143,5 +165,6 @@ func _poll_packets() -> void:
 		var packet = Steam.readP2PPacket(packet_size, 0)
 		if packet and packet.has("data"):
 			var data = bytes_to_var(packet.data)
-			emit_signal("packet_received", data, packet.steam_id_remote)
+			var sender: int = packet.get("remote_steam_id", 0)
+			emit_signal("packet_received", data, sender)
 		packet_size = Steam.getAvailableP2PPacketSize(0)
